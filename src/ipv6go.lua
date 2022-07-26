@@ -1,62 +1,124 @@
 local socket = require("socket")
 local uci = require("uci")
 
-local domainTable = {}
-local ipTable = {}
-local old_ipTable = {}
-
 local iptables_binding_target = ""
 local time_to_update = "600"
+local domain_link_head = nil
+local domain_table = {}
 
 function config()
 	local x = uci.cursor()
-	domainTableConfig(x)
-	iptableConfig(x)
-	sleepConfig(x)
+	domain_table_config(x)
+	iptable_config(x)
+	sleep_config(x)
 end
 
-function domainTableConfig(x)
+function domain_table_config(x)
 	local addr_list = x:get("ipv6pass", "ipv6", "address")
 	if (addr_list == nil ) then return end
 	for _, value in ipairs(addr_list)
     do 
-	table.insert(domainTable, value)
+	table.insert(domain_table, value)
 	print("config loaded ", value, "to table.")
     end
 end
 
-function iptableConfig(x)
+function iptable_config(x)
     local iptables_config = x:get("ipv6pass", "ipv6", "chain")
     if (iptables_config == nil ) then return end
     iptables_binding_target = iptables_config
     print("config loaded ", iptables_config , "for ip6tables rules binding.")
 end
 
-function sleepConfig(x)
-	local sleepSec = x:get("ipv6pass", "ipv6", "sleep")
-	if (sleepSec == nil ) then return end
-	time_to_update = sleepSec
-	print("config loaded ", sleepSec , "s to sleep.")
+function sleep_config(x)
+	local sleep_sec = x:get("ipv6pass", "ipv6", "sleep")
+	if (sleep_sec == nil ) then return end
+	time_to_update = sleep_sec
+	print("config loaded ", sleep_sec , "s to sleep.")
 end
-
-
 
 function sleep(sec)
 	socket.sleep(sec)
 end
 
-function get_ipv6_addr(resolved)
-	for _, v in ipairs(resolved) do
-		if (v ~= nil) then
-			if (v["family"] == "inet6") then
-				return v["addr"]
-			end
-		end
+function domain_info_init()
+	local head = nil
+	for _, v in ipairs(domain_table)
+	do
+		head = {domain = v, cur_ip = nil, pre_ip = nil, is_ip_changed = false, next = head}
+		domain_link_head = head
 	end
-	return nil
 end
 
-function domainToIp(addr)
+function ip_update()
+	local head = domain_link_head
+	while(head ~= nil)
+		do
+		local ip = domain_to_ip(head.domain)
+		if (ip ~= nil ) then
+			head.pre_ip = head.cur_ip
+			head.cur_ip = ip
+		end
+		head = head.next
+	end
+end
+
+function is_ip_changed_update()
+	local head = domain_link_head
+	while(head ~= nil)
+		do
+		local cur = head.cur_ip
+		local pre = head.pre_ip
+		if (cur ~= pre ) then
+			head.is_ip_changed = true
+		end
+		head = head.next
+	end
+end
+
+function is_ip_changed_reset()
+	local head = domain_link_head
+	while(head ~= nil)
+		do
+		head.is_ip_changed = false
+		head = head.next
+	end
+end
+
+function ip_status_update()
+	ip_update()
+	is_ip_changed_reset()
+	is_ip_changed_update()
+end
+
+function fetch_cur_ip()
+	local iplist = {}
+	local head = domain_link_head
+	
+	while(head ~= nil)
+		do
+		if (head.is_ip_changed == true ) then
+			table.insert(iplist, head.cur_ip)
+		end
+		head = head.next
+	end
+	return iplist
+end
+
+function fetch_pre_ip()
+	local iplist = {}
+	local head = domain_link_head
+	while(head ~= nil)
+		do
+		if (head.is_ip_changed == true ) then
+			table.insert(iplist, head.pre_ip)
+		end
+		head = head.next
+	end
+	return iplist
+end
+
+function domain_to_ip(addr)
 	local resolved, _ = socket.dns.getaddrinfo(addr)
 	if (resolved == nil ) then return nil end
 	for _, v in ipairs(resolved) do
@@ -71,47 +133,15 @@ function domainToIp(addr)
 	return nil
 end
 
-function resolveDomainTable( domaintable )
-	local iptable = {}
-	for _, v in ipairs(domaintable)
-		do
-	ip = domainToIp(v)
-	if (ip ~= nil ) then
-		table.insert(iptable, ip)
-	end
-end
-	return iptable
-end
-
-function loopResolving(intermit, times)
-	local t = times
-	repeat
-	ipTable = resolveDomainTable(domainTable)
-	io.write("sleep ", intermit, " sec and ", t, "\n")
-	sleep(intermit)
-	t = t-1
-    until(t <= 0)
-end
-
-function iptablecompare(new, old)
-	local ifIPchange = false
-	local newlistlen = 0
-	local oldlistlen = 0
-	for _ in pairs(new) do newlistlen = newlistlen + 1 end
-	for _ in pairs(old) do oldlistlen = oldlistlen + 1 end
-	if (newlistlen == 0 or oldlistlen == 0 or newlistlen ~= oldlistlen )
-		then
-			ifIPchange = true
-			return ifIPchange
-		end
-
-	for i, v in ipairs(new)
-	do
-		if (new[i] ~= old[i]) then
-			ifIPchange = true
+function get_ipv6_addr(resolved)
+	for _, v in ipairs(resolved) do
+		if (v ~= nil) then
+			if (v["family"] == "inet6") then
+				return v["addr"]
+			end
 		end
 	end
-	return ifIPchange
+	return nil
 end
 
 function create_iptable_rule()
@@ -133,9 +163,8 @@ function if_table_created()
 	return false
 end
 
-function addIP()
-	local handle_flush = io.popen("ipset flush ipv6allow")
-	handle_flush:close()
+function add_ip_to_ipset()
+	local ipTable = fetch_cur_ip()
 	for _, v in ipairs(ipTable)
 	do
 		local handle_add = io.popen("ipset add ipv6allow "..v)
@@ -144,26 +173,60 @@ function addIP()
 	end
 end
 
-function ipset_rules_control()
-		if (not if_table_created())then
-			create_iptable_rule()
-		end
-		addIP()
+function del_ip_from_ipset()
+	local ipTable = fetch_pre_ip()
+	for _, v in ipairs(ipTable)
+	do
+		local handle_add = io.popen("ipset del ipv6allow "..v)
+		print("deleted from ip6tables --- "..v)
+		handle_add:close()
 	end
+end
+
+function flush_ipset()
+	local handle_flush = io.popen("ipset flush ipv6allow")
+	handle_flush:close()
+end
+
+function ipset_rules_init()
+	if (if_table_created())then
+		flush_ipset()
+	else
+		create_iptable_rule()
+	end
+	
+end
+
+function ipset_rules_control()
+	add_ip_to_ipset()
+	del_ip_from_ipset()
+end
+
+function PrintStatus()
+	local head = domain_link_head
+	while(head ~= nil)
+		do
+		print(head.is_ip_changed, "--------",head.domain,"----", head.cur_ip,"----", head.pre_ip)
+		head = head.next
+	end
+end
 
 function run()
 	config()
 	print("Starting ip resolving")
+	domain_info_init()
+	ipset_rules_init()
 	while (true)
 		do
-			loopResolving(1,2)
-			if (iptablecompare(ipTable,old_ipTable)) then 
-				old_ipTable = ipTable
-				ipset_rules_control()
-			end
+			ip_status_update()
+			-- PrintStatus()
+			ipset_rules_control()
 			local message = string.format("Sleep %s S",time_to_update)
 			print(message)
 			sleep(time_to_update)
 		end
 end
+
 run()
+
+

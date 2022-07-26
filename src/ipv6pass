@@ -1,5 +1,5 @@
 config domain 'ipv6'    
          option chain 'forwarding_wan_rule'
 	 option sleep '600'
-         list address 'black.simonchen.space' 
-         list address 'proxy.simonchen.space'
+         list address 'black.xxxxxxxx.space' 
+         list address 'proxy.xxxxxxxx.space'
